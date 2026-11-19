@@ -61,6 +61,25 @@ fi
 chown -R nobody:nobody "$D"
 echo "[railway] data owner after=$(stat -c %u:%g $D)"
 
+# Upstream installs only when the wallabag database does not exist yet, and creates that database before it installs the schema.
+# A deploy stopped in between (Railway redeploys a fresh service several times in its first minute) leaves a database with no
+# administrator, and every later boot prints "already configured" and skips the install for good. Drop such a half-installed
+# database so upstream installs it again; a database that holds any user is never touched.
+repair_half_install() {
+  export PGPASSWORD="$POSTGRES_PASSWORD"
+  pg() { psql -qAt -h "$POSTGRES_HOST" -p 5432 -U "$POSTGRES_USER" "$@"; }
+  n=0
+  until pg -c 'SELECT 1' >/dev/null 2>&1; do n=$((n + 1)); [ "$n" -le 30 ] || return 0; sleep 2; done
+  [ "$(pg -c "SELECT 1 FROM pg_database WHERE datname='wallabag'")" = 1 ] || return 0
+  reg="$(pg -d wallabag -c "SELECT to_regclass('public.wallabag_user')")" || return 0
+  users=0
+  [ -z "$reg" ] || users="$(pg -d wallabag -c 'SELECT count(*) FROM wallabag_user')" || return 0
+  if [ "$users" = 0 ]; then
+    pg -c 'DROP DATABASE wallabag WITH (FORCE)' >/dev/null && echo "[railway] dropped half-installed database, upstream installs it again"
+  fi
+}
+repair_half_install
+
 run_app() { su -s /bin/sh nobody -c "cd /var/www/wallabag && $1"; }
 
 (
